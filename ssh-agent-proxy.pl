@@ -1,4 +1,4 @@
-#!/usr/local/bin/perl
+#!/usr/bin/perl
 
 use 5.008;
 use warnings;
@@ -42,7 +42,6 @@ use constant PAIR_TYPE                                 => 0;
 use constant PAIR_SOCKET                               => 1;
 use constant PAIR_AGENT_INFO                           => 2;
 use constant STAT_MTIME                                => 9;
-use constant SSH_MESSAGE_AGENTC_REQUEST_RSA_IDENTITIES => "\x00\x00\x00\x01\x01";
 use constant SSH2_MESSAGE_AGENTC_REQUEST_IDENTITIES    => "\x00\x00\x00\x01\x0B";
 
 if ( DEBUG ) {
@@ -57,7 +56,6 @@ my %is_SSH_AGENT_FAILURE =
  ( "\x00\x00\x00\x01\x05" => 1, "\x00\x00\x00\x01\x1E" => 1, "\x00\x00\x00\x01\x66" => 1 );
 
 my %SSH_REPLY_CODE_FOR = (
-    &SSH_MESSAGE_AGENTC_REQUEST_RSA_IDENTITIES    => 0x02,
     &SSH2_MESSAGE_AGENTC_REQUEST_IDENTITIES => 0x0C,
 );
 
@@ -265,40 +263,6 @@ sub test_authsock {
     my $total_keys_loaded = 0;
 
     # We jack with alarm() here, so make sure we reset it before exiting.
-    $agent_sock->send( SSH_MESSAGE_AGENTC_REQUEST_RSA_IDENTITIES );
-    eval {
-        local $SIG{ALRM} = sub { die "a\n"; };
-        local $SIG{__DIE__} = undef;
-        alarm SSH_AGENT_VALIDATION_TIMEOUT;
-        $agent_sock->recv( $buf, 1024 );
-        ( $identity_count, $message_length ) = decode_identity_reply( $buf, $SSH_REPLY_CODE_FOR{&SSH_MESSAGE_AGENTC_REQUEST_RSA_IDENTITIES} );
-        debug_print "after decode, id is " . ( defined $identity_count ? 'defined' : 'undefined' );
-        if ( !defined $identity_count ) { die "i\n"; }
-        debug_print "message length is $message_length, buf is " . length($buf);
-        $message_length -= ( length($buf) - 4 );
-        while ( $message_length > 0 ) {
-            debug_print "Reading remaining $message_length bytes";
-            my $buf2;
-            $agent_sock->recv( $buf2, 1024 );
-            die "e\n" if ( length( $buf2 ) < 1 );
-            $message_length -= length($buf2);
-        }
-        alarm 0;
-    };
-    if ( $@ ) {
-        debug_print "got error $@";
-        alarm 0;
-        $agent_sock->close();
-        debug_print "Got a bad SSH_MESSAGE_AGENTC_REQUEST_RSA_IDENTITIES result";
-        $bad_sockets{$agent_socket_file} = ( stat( $agent_socket_file ) )[STAT_MTIME];
-        alarm SCREEN_PROCESS_CHECK_INTERVAL if $options{exit_with_screen};
-        return 0;
-    }
-    if ( $buf ) { debug_print "ident reply!"; }
-    #if ( $buf ) { debug_print "ident reply: " . hexdump( data => $buf ); }
-    debug_print "got reply, saw $identity_count keys";
-    $total_keys_loaded += $identity_count;
-
     $agent_sock->send( SSH2_MESSAGE_AGENTC_REQUEST_IDENTITIES );
     eval {
         local $SIG{ALRM} = sub { die "a\n"; };
@@ -551,25 +515,9 @@ while ( 1 ) {
                     close_socket_pair( $ready_to_read );
                     next;
                 } else {
-                    #debug_print hexdump( data => $buf );
+                    if ( DEBUG ) { debug_print hexdump( data => $buf ); }
                 }
                 my ( $other_end_type, $other_end ) = @{ $socket_pairs{$ready_to_read} };
-                if (   ( $other_end_type == SOCKET_TYPE_CLIENT )
-                    && ( length( $buf ) == 5 )
-                    && ( $is_SSH_AGENT_FAILURE{$buf} ) )
-                {
-                    debug_print "got SSH2?_AGENT_FAILURE";
-                    # Blacklist BEFORE you close because we need that reverse
-                    # mapping!
-                    # Not sure we want to do this, since it should happen for
-                    # us when our client sees the bad data and disconnectes.
-                    # On reconnection, the regular socket testing code would
-                    # blacklist this socket for us. Same for the blacklisting
-                    # that happens below (in the write failure code).
-                    blacklist_agent_socket( $ready_to_read );
-                    close_socket_pair( $ready_to_read );
-                    next;
-                }
                 if ( !defined syswrite( $other_end, $buf, length( $buf ) ) ) {
                     debug_print "write failed to $other_end";
                     blacklist_agent_socket( $ready_to_read );
